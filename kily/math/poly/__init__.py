@@ -2,7 +2,8 @@ from typing import Tuple, List, Optional, Union, Callable
 from copy import copy
 import queue
 
-from math import modulo_inverse, gcd, prime_test
+from kily.math import modulo_inverse, gcd, prime_test
+import math
 
 
 class Polynomial(object):
@@ -20,22 +21,36 @@ class Polynomial(object):
     """
     NLOGN_TIME_OPTIMIZATIONS_FROM_N = 128
 
-
     @property
-    def ONE(self):
+    def one(self):
         return self.from_values([1])
 
     @property
-    def ZERO(self):
+    def zero(self):
         return self.from_values([0])
 
     @property
-    def X(self):
-        return self.from_values([0,1])
+    def x(self):
+        return self.from_values([0, 1])
 
-    def __init__(self, values: List[int], normalize: bool = False,
-                 mod_or_provider: Union[int,Callable[[], int]] = None,
-                 laziness: bool = False):
+    @classmethod
+    def make(cls, values: List[int], mod: Union[int, Callable[[], int]]):
+        return Polynomial(values, mod_or_provider=mod)
+
+    @classmethod
+    def make_one(cls, mod: Union[int, Callable[[], int]]) -> 'Polynomial':
+        return cls.make([1], mod)
+
+    @classmethod
+    def make_zero(cls, mod: Union[int, Callable[[], int]]) -> 'Polynomial':
+        return cls.make([0], mod)
+
+    @classmethod
+    def make_x(cls, mod: Union[int, Callable[[], int]]) -> 'Polynomial':
+        return cls.make([0, 1], mod)
+
+    def __init__(self, values: List[int], mod_or_provider: Union[int, Callable[[], int]],
+                 normalize: bool = False, laziness: bool = False):
         self._values = list(values)
         # laziness - an operation (multiplication, division, addition by a constant), which
         # performs uniformly on all polynomial's coefficients, computes only in time, when the exact
@@ -108,6 +123,21 @@ class Polynomial(object):
                 return False
         return True
 
+    @property
+    def is_coef(self) -> bool:
+        self.compact()
+        return len(self) == 1
+
+    @property
+    def is_zero(self) -> bool:
+        self.compact()
+        return len(self) == 0 or self[0] == 0
+
+    @property
+    def is_one(self) -> bool:
+        self.compact()
+        return len(self) == 1 and self[0] == 1
+
     @classmethod
     def mod_check(cls, mod: int, greater: Optional[int] = None,
                   coprime: Optional[int] = None, prime: bool = False,
@@ -127,6 +157,24 @@ class Polynomial(object):
                           mod_or_provider=self._mod,
                           normalize=False)
 
+    @classmethod
+    def from_binary(cls, value: int, mod_or_provider: Union[int, Callable[[], int]]):
+        mod = mod_or_provider if mod_or_provider is int else mod_or_provider()
+        cls.mod_check(mod, greater=2)
+        bits = int(math.ceil(math.log(mod, 2)))
+        done = False
+        coefs = []
+        mask = int('1' * bits, 2)
+        while not done:
+            i = 0
+            if value != 0:
+                coef = value & mask
+                value >>= bits
+                coefs.append(coef % mod)
+            if value == 0:
+                done = True
+        return cls.make(coefs, mod_or_provider)
+
     def normalize(self) -> int:
         """
         Performs two operations: compacts polynomial and normalizes it
@@ -135,7 +183,7 @@ class Polynomial(object):
         """
         self.compact()
         ret = self._values[-1]
-        if ret and self != self.ZERO:
+        if ret and self != self.zero:
             self.mod_check(self.mod, coprime=ret)
             inv = modulo_inverse(self._values[-1], self.mod)
             self.mult_coefs(inv)
@@ -201,15 +249,34 @@ class Polynomial(object):
                 act(compacted, compacted_op)
         act(compacted, compacted_op)
 
+    def shift(self, offset: int):
+        if offset == 0:
+            return
+        elif offset < 0:
+            self._values = self._values[-offset:]
+        else:
+            self._values = list(0 for _ in range(offset)) + self._values
+
+    def reverse(self):
+        self._values.reverse()
+
     def gcd(self, other: 'Polynomial'):
 
-        if self == self.ONE or other == self.ONE:
-            return self.ONE
+        if self == self.one or other == self.one:
+            return self.one
         if self == other:
             return copy(other)
 
         if self < other:
             return self.gcd(other % self)
+
+    def poly_sanity(self, other: 'Polynomial', raise_error: bool = True) -> bool:
+        if self.mod != other.mod:
+            if raise_error:
+                raise ValueError(f'Mods are not compatable: self -> {self.mod} and other -> {other.mod}')
+            else:
+                return True
+        return True
 
     def __len__(self):
         return len(self._values)
@@ -227,7 +294,7 @@ class Polynomial(object):
         self._values[i] = value
 
     def __copy__(self):
-        cp = Polynomial(self._values, self.mod, self._laziness)
+        cp = self.from_values(self._values)
         cp._lazy_queue = copy(self._lazy_queue)
         return cp
 
@@ -275,7 +342,7 @@ class Polynomial(object):
                 for j in range(i+1):
                     val = (val + self[j] + other[i-j-1]) % m
                 values[i] = val
-            return Polynomial(values, False, self.mod, self.lazy)
+            return self.from_values(values)
 
     def __eq__(self, other: 'Polynomial'):
         if self.mod != other.mod:
@@ -291,11 +358,10 @@ class Polynomial(object):
                 return False
         return True
 
-
     def __pow__(self, power: int):
         # naive with binary
         if power == 0:
-            return self.ONE
+            return self.one
 
         val = copy(self)
         if power == 1:
@@ -310,16 +376,15 @@ class Polynomial(object):
             val *= val
         return res
 
-
     def __mod__(self, other: 'Polynomial'):
         # naive table method
         _, mod = self._compute_poly_divide(other)
         return mod
 
-
-
-    def __floordiv__(self, other: 'Polynomial'):
-        raise NotImplementedError
+    def __floordiv__(self, other: Union[int, 'Polynomial']):
+        # naive table method
+        div, _ = self._compute_poly_divide(other if other is Polynomial else self.from_values([other]))
+        return div
 
     def _compute_mult(self, coef: int):
         # pop all the greater coefs
@@ -344,15 +409,15 @@ class Polynomial(object):
     def _compute_poly_divide(self, other: 'Polynomial') -> Tuple['Polynomial', 'Polynomial']:
         self.poly_sanity(other)
         if self.is_zero:
-            return self.ZERO, self.ZERO
+            return self.zero, self.zero
         elif other.is_zero:
             raise ZeroDivisionError("Cannot divide by zero")
         elif other.is_one:
-            return copy(self), self.ZERO
+            return copy(self), self.zero
         elif other.is_coef:
             cp = copy(self)
             cp._compute_mult(modulo_inverse(other[0], self.mod))
-            return cp, self.ZERO
+            return cp, self.zero
         elif other.is_x_pow:
             power = other.deg
             a = other[-1]
@@ -362,15 +427,16 @@ class Polynomial(object):
             return div, mod
         else:
             cp = copy(self)
-            div_vals = []
             m = self.mod
+            div_vals = list(0 for _ in range(len(cp) - len(other) + 1))
             while cp.deg > other.deg:
                 shift = cp.deg - other.deg
                 coef = cp[-1]*modulo_inverse(other[-1], m)
-                deleter = other.shift()*coef
-                
-
-
+                deleter = copy(other)*coef
+                div_vals[shift+1] = coef
+                deleter.shift(shift)
+                cp = cp - deleter
+            return self.from_values(div_vals), cp
 
     def __lazy_queue_intercept(self, i: int):
         raise NotImplementedError("Skip lists are not implemented yet, so no"
